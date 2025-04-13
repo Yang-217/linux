@@ -29,5 +29,5 @@
 ### 一键命令：
 
 ```
-wget https://raw.githubusercontent.com/Yang-217/linux/refs/heads/main/swap.sh 
+bash <(curl -sL https://raw.githubusercontent.com/Yang-217/linux/refs/heads/main/swap.sh)
 ```
