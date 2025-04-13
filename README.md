@@ -28,4 +28,6 @@
 
 ### 一键命令：
 
-''' https://raw.githubusercontent.com/Yang-217/linux/refs/heads/main/swap.sh '''
+''' 
+wget https://raw.githubusercontent.com/Yang-217/linux/refs/heads/main/swap.sh 
+'''
