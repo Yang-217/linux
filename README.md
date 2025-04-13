@@ -26,5 +26,6 @@
 
 简单易用的菜单系统：用户可以通过简单的命令行菜单选择操作。
 
-## 一键命令：
+### 一键命令：
 
+'https://raw.githubusercontent.com/Yang-217/linux/refs/heads/main/swap.sh'
