@@ -1,10 +1,9 @@
 #!/bin/bash
 
 #=================================================================================
-# Linux Swap 内存管理脚本 (V3)
+# Linux Swap 内存管理脚本 (V4)
 # 功能: 创建、删除、查看 Swap 分区（使用文件），自动处理权限、挂载和开机启动。
-# 修改: 移除 fstab 自动备份，改为操作前询问是否备份 fstab。
-# 保留: 删除前询问是否备份 Swap 文件本身。
+# 修改: 默认不进行任何备份。仅在删除 Swap 文件时，询问是否备份该文件。
 #=================================================================================
 
 # --- 配置 ---
@@ -27,24 +26,14 @@ print_success() { print_message "$COLOR_GREEN" "✅ 操作成功: $1"; }
 print_error() { print_message "$COLOR_RED" "❌ 操作失败: $1"; }
 print_warning() { print_message "$COLOR_YELLOW" "⚠️ 警告: $1"; }
 
-# 确认操作函数
-# $1: 提示信息
-# $2: 默认选项 (可选, Y 或 N)
+# 确认操作函数 (默认 No)
 confirm_action() {
     local prompt="$1"
-    local default_choice="$2"
     local choice
-    local options="[y/N]" # 默认不执行
-    local default_return=1 # 默认返回 1 (No)
-
-    if [[ "$default_choice" =~ ^[Yy]$ ]]; then
-        options="[Y/n]"
-        default_return=0 # 默认返回 0 (Yes)
-    fi
-
     while true; do
-        read -p "$(print_message "$COLOR_YELLOW" "${prompt} ${options}: ")" choice
-        choice="${choice:-$default_choice}" # 如果用户直接回车，使用默认值
+        # 默认是 N (No)
+        read -p "$(print_message "$COLOR_YELLOW" "${prompt} [y/N]: ")" choice
+        choice="${choice:-N}" # 如果用户直接回车，默认为 N
 
         if [[ "$choice" =~ ^[Yy]$ ]]; then
             return 0 # Yes
@@ -88,28 +77,11 @@ check_swap_status() {
 # 检查 fstab 条目
 check_fstab() {
     local file_to_check="$1"
-    if grep -q "^\s*${file_to_check}\s\+none\s\+swap\s\+sw\s\+" /etc/fstab; then
+    # 精确匹配 fstab 中的 swap 条目
+    if grep -q "^\s*${file_to_check}\s\+none\s\+swap\s\+sw\s\+0\s\+0" /etc/fstab; then
         return 0 # 存在
     else
         return 1 # 不存在
-    fi
-}
-
-# 备份文件函数
-# $1: 要备份的文件
-# $2: 备份文件名前缀 (可选)
-backup_file() {
-    local file_to_backup="$1"
-    local prefix="${2:-backup}" # 默认前缀为 backup
-    local timestamp=$(date +%Y%m%d_%H%M%S)
-    local backup_path="${file_to_backup}.${prefix}_${timestamp}"
-
-    if cp -a "$file_to_backup" "$backup_path"; then
-        print_success "文件 '$file_to_backup' 已成功备份到 '$backup_path'"
-        return 0
-    else
-        print_error "备份文件 '$file_to_backup' 到 '$backup_path' 失败。"
-        return 1
     fi
 }
 
@@ -118,25 +90,30 @@ backup_file() {
 # 创建 Swap 文件
 create_swap() {
     print_message "$COLOR_BOLD_WHITE" "\n--- 1. 创建 Swap 分区 ($SWAP_FILE) ---"
-    # ... (检查文件存在、活动状态、获取大小、检查磁盘空间的代码与 V2 相同) ...
+    # 检查存在性和活动状态
     if [[ -f "$SWAP_FILE" ]]; then print_error "'$SWAP_FILE' 已存在。"; return 1; fi
     if swapon --show | grep -q "$SWAP_FILE"; then print_error "'$SWAP_FILE' 已激活。"; return 1; fi
+
+    # 获取大小并验证
     local size_gb
     while true; do
-        read -p "$(print_message "$COLOR_YELLOW" "请输入 Swap 大小 (GB): ")" size_gb
+        read -p "$(print_message "$COLOR_YELLOW" "请输入要创建的 Swap 大小（单位 G，例如输入2 表示 2G）: ")" size_gb
         if [[ "$size_gb" =~ ^[1-9][0-9]*$ ]]; then
+            # 检查磁盘空间
             local required_kb=$((size_gb * 1024 * 1024))
-            local available_kb=$(df "$(dirname "$SWAP_FILE")" | awk 'NR==2 {print $4}')
+            local target_dir=$(dirname "$SWAP_FILE")
+            local available_kb=$(df "$target_dir" | awk 'NR==2 {print $4}')
             if [[ "$available_kb" -lt "$required_kb" ]]; then
                  local available_gb=$(awk "BEGIN {printf \"%.2f\", $available_kb / 1024 / 1024}")
-                 print_warning "磁盘空间不足 (需 ${size_gb}G, 可用 ~${available_gb}G)。"
-                 confirm_action "是否仍尝试创建？" "N" || { print_message "$COLOR_YELLOW" "操作取消。"; return 1; }
+                 print_warning "目标路径 '$target_dir' 磁盘空间不足 (需 ${size_gb}G, 可用 ~${available_gb}G)。"
+                 confirm_action "是否仍尝试创建？" || { print_message "$COLOR_YELLOW" "操作取消。"; return 1; }
             fi
-            break
+            break # 输入有效，空间足够或用户确认继续
         else print_error "输入无效，请输入正整数。"; fi
     done
+
     print_message "$COLOR_CYAN" "准备创建 ${size_gb}G Swap 文件 '$SWAP_FILE'..."
-    local total_steps=6
+    local total_steps=6 # 更新总步骤数
 
     # 1. 分配空间
     print_step 1 $total_steps "分配空间"
@@ -162,37 +139,19 @@ create_swap() {
     if ! swapon "$SWAP_FILE"; then print_error "启用失败。"; rm -f "$SWAP_FILE"; return 1; fi
     print_success "启用成功。"
 
-    # 5. 处理 fstab (修改点)
+    # 5. 添加到 fstab (无备份提示)
     print_step 5 $total_steps "配置开机自启 (/etc/fstab)"
     if check_fstab "$SWAP_FILE"; then
         print_warning "'$SWAP_FILE' 的条目已存在于 /etc/fstab，跳过添加。"
     else
-        print_message "$COLOR_YELLOW" "检测到 '$SWAP_FILE' 的条目不存在于 /etc/fstab。"
-        if confirm_action "是否要将此 Swap 添加到 /etc/fstab 以实现开机自动挂载？" "Y"; then
-            # 确认添加后，询问是否备份 fstab
-            if confirm_action "是否在修改 /etc/fstab 前对其进行备份？(推荐)" "Y"; then
-                if ! backup_file "/etc/fstab" "fstab"; then
-                    # 如果备份失败，让用户决定是否继续
-                    confirm_action "备份 /etc/fstab 失败，是否仍要继续添加条目？" "N" || {
-                        print_warning "已取消向 /etc/fstab 添加条目。Swap 当前已激活，但重启后不会自动挂载。"
-                        # 注意：这里不 return，只是不添加 fstab 条目，前面步骤已完成
-                        return 0 # 算创建成功，只是没加fstab
-                    }
-                     print_warning "继续在未备份的情况下添加 fstab 条目..."
-                fi
-            else
-                 print_message "$COLOR_YELLOW" "已选择不备份 /etc/fstab。"
-            fi
-
-            # 执行添加
-            if echo "$SWAP_FILE none swap sw 0 0" >> /etc/fstab; then
-                print_success "成功添加 Swap 条目到 /etc/fstab。"
-            else
-                print_error "无法写入 /etc/fstab。请检查权限或手动添加。"
-                print_warning "Swap 当前已激活，但开机自启配置失败。"
-            fi
+        print_message "$COLOR_CYAN" "正在将 Swap 条目添加到 /etc/fstab..."
+        # 直接添加，不备份
+        if echo "$SWAP_FILE none swap sw 0 0" >> /etc/fstab; then
+            print_success "成功添加 Swap 条目到 /etc/fstab。"
         else
-            print_warning "已跳过向 /etc/fstab 添加条目。Swap 当前已激活，但重启后不会自动挂载。"
+            print_error "无法写入 /etc/fstab。请检查权限或手动添加以下行："
+            print_message "$COLOR_YELLOW" "$SWAP_FILE none swap sw 0 0"
+            print_warning "Swap 当前已激活，但开机自启配置失败。"
         fi
     fi
 
@@ -206,18 +165,16 @@ create_swap() {
 delete_swap() {
     print_message "$COLOR_BOLD_WHITE" "\n--- 2. 删除 Swap 分区 ($SWAP_FILE) ---"
 
+    # 检查文件是否存在
     if [[ ! -f "$SWAP_FILE" ]]; then
         print_error "指定的 Swap 文件 '$SWAP_FILE' 不存在。"
+        # 检查是否有残留 fstab 条目 (不提示备份，直接询问是否移除)
         if check_fstab "$SWAP_FILE"; then
             print_warning "'$SWAP_FILE' 的条目仍存在于 /etc/fstab 中。"
-            if confirm_action "是否尝试自动从 /etc/fstab 中移除该残留条目？" "Y"; then
-                # 移除残留条目时也询问备份
-                if confirm_action "是否在修改 /etc/fstab 前备份？(推荐)" "Y"; then
-                   backup_file "/etc/fstab" "fstab_pre_remove_orphan" || print_warning "备份失败，继续移除..."
-                else
-                   print_message "$COLOR_YELLOW" "已选择不备份 /etc/fstab。"
-                fi
-                if sed -i "\|^\s*${SWAP_FILE}\s\+none\s\+swap\s\+sw\s\+|d" /etc/fstab; then
+            if confirm_action "是否尝试自动从 /etc/fstab 中移除该残留条目？"; then
+                print_message "$COLOR_CYAN" "正在尝试移除残留的 fstab 条目..."
+                # 使用 sed 直接删除，不备份
+                if sed -i "\|^\s*${SWAP_FILE}\s\+none\s\+swap\s\+sw\s\+0\s\+0|d" /etc/fstab; then
                     print_success "成功移除残留的 fstab 条目。"
                 else
                     print_error "自动移除残留 fstab 条目失败，请手动编辑。"
@@ -229,39 +186,62 @@ delete_swap() {
         return 1
     fi
 
-    # 询问备份 Swap 文件本身 (保留此功能)
-    local backup_swap_file_path=""
-    print_message "$COLOR_BLUE" "\n--- Swap 文件备份 (可选) ---"
-    print_warning "备份 Swap 文件本身通常没有必要，因为它只包含临时数据。"
-    if confirm_action "是否要在删除前备份 '$SWAP_FILE' 文件？" "N"; then
+    # --- 询问是否备份 Swap 文件本身 ---
+    local backup_swap_file_path="" # 用于存储备份路径
+    print_message "$COLOR_BLUE" "\n--- Swap 文件备份确认 (可选) ---"
+    print_warning "Swap 文件通常包含临时数据，备份它一般没有必要。"
+    if confirm_action "删除操作会移除 '$SWAP_FILE'。是否要在删除前对其进行备份？"; then
+        # 用户选择备份
         local default_backup_path="/tmp/swapfile_backup_$(date +%Y%m%d_%H%M%S)"
         read -p "$(print_message "$COLOR_YELLOW" "请输入备份文件的完整路径 [${default_backup_path}]: ")" backup_path
-        backup_path="${backup_path:-$default_backup_path}"
-        local backup_dir=$(dirname "$backup_path")
-        if [[ ! -d "$backup_dir" ]]; then mkdir -p "$backup_dir" || { print_error "创建备份目录失败。"; backup_path=""; }; fi # 如果目录创建失败则不备份
+        backup_path="${backup_path:-$default_backup_path}" # 使用默认或用户输入
 
-        if [[ -n "$backup_path" ]]; then # 只有目录成功或已存在才尝试备份
-           print_message "$COLOR_CYAN" "尝试备份到 '$backup_path'..."
-           if cp -a "$SWAP_FILE" "$backup_path"; then
-               print_success "Swap 文件已备份到 '$backup_path'"
-               backup_swap_file_path="$backup_path" # 记录备份路径
-           else
-               print_error "备份 Swap 文件失败。"
-               confirm_action "备份失败，是否仍要继续删除？" "Y" || { print_message "$COLOR_YELLOW" "删除操作取消。"; return 1; }
-           fi
+        # 尝试创建备份目录
+        local backup_dir=$(dirname "$backup_path")
+        if [[ ! -d "$backup_dir" ]]; then
+            if ! mkdir -p "$backup_dir"; then
+                print_error "创建备份目录 '$backup_dir' 失败。"
+                # 备份失败，询问是否继续删除
+                confirm_action "备份失败，是否仍要继续删除 Swap 文件（不备份）？" || {
+                     print_message "$COLOR_YELLOW" "删除操作已取消。"; return 1;
+                }
+                # 如果继续，则 backup_swap_file_path 保持为空
+            fi
+        fi
+
+        # 如果目录创建成功或已存在，尝试备份
+        if [[ -d "$backup_dir" ]]; then
+             print_message "$COLOR_CYAN" "尝试将 '$SWAP_FILE' 备份到 '$backup_path'..."
+             if cp -a "$SWAP_FILE" "$backup_path"; then
+                 print_success "Swap 文件已成功备份到 '$backup_path'"
+                 backup_swap_file_path="$backup_path" # 记录成功的备份路径
+             else
+                 print_error "备份 Swap 文件到 '$backup_path' 失败。"
+                 # 备份失败，询问是否继续删除
+                 confirm_action "备份失败，是否仍要继续删除 Swap 文件（不备份）？" || {
+                      print_message "$COLOR_YELLOW" "删除操作已取消。"; return 1;
+                 }
+                 # 如果继续，则 backup_swap_file_path 保持为空
+             fi
         fi
     else
-        print_message "$COLOR_YELLOW" "已跳过备份 Swap 文件。"
+        # 用户选择不备份
+        print_message "$COLOR_YELLOW" "已选择不备份 Swap 文件。"
     fi
+    # --- 备份询问结束 ---
 
     # 最终确认删除
-    print_message "$COLOR_BLUE" "\n--- 删除确认 ---"
-    print_warning "即将执行删除步骤（停用 Swap、可选移除 fstab 条目、删除文件）。"
-    print_warning "确保有足够物理内存容纳 Swap 内容，否则可能导致系统不稳定。"
-    confirm_action "确定要继续执行删除操作吗？" "N" || {
-        print_message "$COLOR_YELLOW" "操作已取消。"
+    print_message "$COLOR_BLUE" "\n--- 执行删除确认 ---"
+    print_warning "即将执行以下删除步骤："
+    print_warning "  1. 停用 Swap 文件 '$SWAP_FILE' (如果活动)。"
+    print_warning "  2. 从 /etc/fstab 中移除自动挂载条目 (如果存在)。"
+    print_warning "  3. 删除 Swap 文件 '$SWAP_FILE'。"
+    print_warning "确保系统有足够的物理内存容纳 Swap 内容，否则可能导致系统不稳定。"
+    confirm_action "确定要继续执行删除操作吗？" || {
+        print_message "$COLOR_YELLOW" "删除操作已取消。"
+        # 如果之前意外备份成功了，提醒一下
         if [[ -n "$backup_swap_file_path" ]]; then
-            print_warning "之前创建的 Swap 文件备份位于: $backup_swap_file_path"
+            print_warning "请注意：之前创建的 Swap 文件备份位于: $backup_swap_file_path"
         fi
         return 1
     }
@@ -276,45 +256,35 @@ delete_swap() {
             print_error "停用 Swap '$SWAP_FILE' 失败 (可能内存不足)。"
             print_warning "删除操作中止以保护系统。"
              if [[ -n "$backup_swap_file_path" ]]; then print_warning "Swap 文件备份位于: $backup_swap_file_path"; fi
-            return 1
+            return 1 # 停用失败是严重问题，中止
         fi
         print_success "Swap 文件已停用。"
     else
         print_message "$COLOR_YELLOW" "'$SWAP_FILE' 当前未激活。"
     fi
 
-    # 2. 处理 fstab (修改点)
+    # 2. 从 fstab 移除条目 (无备份提示)
     print_step 2 $total_steps "处理 /etc/fstab 条目"
     if check_fstab "$SWAP_FILE"; then
-        print_message "$COLOR_YELLOW" "在 /etc/fstab 中找到 '$SWAP_FILE' 的条目。"
-        if confirm_action "是否要从 /etc/fstab 中移除此条目？" "Y"; then
-             # 确认移除后，询问是否备份 fstab
-             if confirm_action "是否在修改 /etc/fstab 前备份？(推荐)" "Y"; then
-                 backup_file "/etc/fstab" "fstab_pre_remove" || print_warning "备份失败，继续移除..."
-             else
-                 print_message "$COLOR_YELLOW" "已选择不备份 /etc/fstab。"
-             fi
-             # 执行移除
-             if sed -i "\|^\s*${SWAP_FILE}\s\+none\s\+swap\s\+sw\s\+|d" /etc/fstab; then
-                 print_success "成功从 /etc/fstab 移除条目。"
-             else
-                 print_error "自动移除 fstab 条目失败，请手动编辑。"
-                 success=false
-             fi
+        print_message "$COLOR_CYAN" "正在从 /etc/fstab 移除 '$SWAP_FILE' 条目..."
+        # 直接移除，不备份
+        if sed -i "\|^\s*${SWAP_FILE}\s\+none\s\+swap\s\+sw\s\+0\s\+0|d" /etc/fstab; then
+            print_success "成功从 /etc/fstab 移除条目。"
         else
-            print_warning "已跳过从 /etc/fstab 移除条目。如果文件被删除，此条目可能导致启动问题。"
+            print_error "自动移除 fstab 条目失败，请手动编辑。"
+            success=false # 标记操作有部分失败
         fi
     else
-        print_message "$COLOR_YELLOW" "/etc/fstab 中未找到 '$SWAP_FILE' 条目。"
+        print_message "$COLOR_YELLOW" "/etc/fstab 中未找到 '$SWAP_FILE' 条目，无需移除。"
     fi
 
-    # 3. 删除文件
+    # 3. 删除物理文件
     print_step 3 $total_steps "删除 Swap 文件 (rm)"
     if rm -f "$SWAP_FILE"; then
         print_success "Swap 文件 '$SWAP_FILE' 已删除。"
     else
         print_error "删除 Swap 文件 '$SWAP_FILE' 失败。请检查权限或手动删除。"
-        success=false
+        success=false # 标记操作有部分失败
     fi
 
     # 总结
@@ -322,15 +292,16 @@ delete_swap() {
     if [[ "$success" = true ]]; then
          print_message "$COLOR_BOLD_WHITE" "✅ Swap 删除操作已完成。"
     else
-         print_warning "⚠️ Swap 删除操作已完成，但遇到问题。请检查日志。"
+         print_warning "⚠️ Swap 删除操作已完成，但过程中遇到问题。请检查日志。"
     fi
+    # 如果用户之前选择了备份且成功了，提醒路径
     if [[ -n "$backup_swap_file_path" ]]; then
         print_message "$COLOR_YELLOW" "之前请求的 Swap 文件备份位于: $backup_swap_file_path"
     fi
-    check_swap_status
+    check_swap_status # 显示最终状态
 }
 
-# 显示详情 (不变)
+# 显示 Swap 详情 (与 V3 相同)
 show_details() {
     print_message "$COLOR_BOLD_WHITE" "\n--- 3. 查看 Swap 详情 ---"
     check_swap_status
@@ -349,7 +320,7 @@ show_details() {
     echo
 }
 
-# 显示菜单 (不变)
+# 显示主菜单 (与 V3 相同)
 show_menu() {
     clear
     print_message "$COLOR_CYAN" "==============================================="
@@ -373,7 +344,8 @@ show_menu() {
 }
 
 # --- 主逻辑 ---
-check_root "$@"
+check_root "$@" # 检查 root 权限
+
 while true; do
     show_menu
     read -p "$(print_message "$COLOR_YELLOW" "请输入选项 [1-4]: ")" choice
@@ -384,6 +356,8 @@ while true; do
         4) print_message "$COLOR_CYAN" "\n脚本退出。"; exit 0 ;;
         *) print_error "无效选项。" ;;
     esac
+    # 等待用户按键继续
     read -n 1 -s -r -p "$(print_message "$COLOR_YELLOW" "\n按任意键返回主菜单...")"; echo
 done
+
 exit 0
