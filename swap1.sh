@@ -2,13 +2,13 @@
 
 # ==============================================================================
 # 脚本名称: swap.sh
-# 脚本功能: 提供菜单式操作，用于在 Linux 系统中添加、删除、查看 Swap 交换文件。
-# 特点:    自动检查 root 权限 (提示 sudo), GB 单位输入, fstab 管理, 中文界面。
+# 脚本功能: 提供菜单式操作，管理 Linux Swap 交换文件 (添加/删除/查看)。
+# 特点:    自动 root 检查 (提示 sudo), GB 单位输入, fstab 备份询问, 中文界面。
 # ==============================================================================
 
 # --- 全局配置 ---
 # 默认管理的 Swap 文件路径 (脚本将主要操作这个文件)
-# !! 重要: 如果你要管理其他 swap 文件，需要修改此脚本或手动操作 !!
+# !! 注意: 此脚本设计用于管理 *特定* 的一个 swap 文件路径 !!
 SWAP_FILE="/swapfile"
 FSTAB_FILE="/etc/fstab"
 
@@ -45,7 +45,7 @@ print_color() {
 
 # 打印分隔线
 print_separator() {
-    echo "${BLUE}============================================================${RESET}"
+    echo "${BLUE}------------------------------------------------------------${RESET}"
 }
 
 # 等待用户按键继续
@@ -55,12 +55,43 @@ press_any_key_to_continue() {
     echo ""
 }
 
+# 询问用户确认 (Y/N)
+# $1: 提示信息
+# 返回值: 0 表示 Yes, 1 表示 No
+confirm_action() {
+    local prompt="$1"
+    local response
+    while true; do
+        read -p "${YELLOW}${prompt} (y/N): ${RESET}" response
+        case "$response" in
+            [Yy]* ) return 0;; # Yes
+            [Nn]* | "" ) return 1;; # No or Enter
+            * ) print_color "$RED" "请输入 'y' 或 'n'。";;
+        esac
+    done
+}
+
+# 备份 /etc/fstab 文件
+# 返回值: 0 表示成功或无需备份，1 表示失败
+backup_fstab() {
+    local backup_fstab="${FSTAB_FILE}.bak_swap_$(date +%Y%m%d_%H%M%S)"
+    print_color "$MAGENTA" "正在备份 $FSTAB_FILE 到 $backup_fstab ..."
+    cp "$FSTAB_FILE" "$backup_fstab"
+    if [[ $? -eq 0 ]]; then
+        print_color "$GREEN" "备份成功。"
+        return 0
+    else
+        print_color "$RED" "错误: 备份 $FSTAB_FILE 失败！"
+        return 1
+    fi
+}
+
 # --- 核心功能函数 ---
 
 # 1. 添加 Swap 分区 (文件)
 add_swap() {
     print_separator
-    print_color "$CYAN" "   Swap 添加向导"
+    print_color "$CYAN$BOLD" "   1. 添加 Swap 功能"
     print_separator
 
     # 检查 Swap 文件是否已存在
@@ -70,7 +101,7 @@ add_swap() {
         press_any_key_to_continue
         return
     fi
-    # 检查 fstab 中是否已有此文件的条目 (防止残留配置)
+    # 检查 fstab 中是否已有此文件的条目
     if grep -qF "$SWAP_FILE" "$FSTAB_FILE"; then
         print_color "$YELLOW" "警告: '$SWAP_FILE' 的配置已存在于 $FSTAB_FILE 中。"
         print_color "$YELLOW" "       请先使用 '删除 Swap' 功能清理配置，或手动编辑 $FSTAB_FILE。"
@@ -80,11 +111,11 @@ add_swap() {
 
     # 获取用户输入的大小 (GB)
     while true; do
-        read -p "${GREEN}请输入要创建的 Swap 大小 (单位 GB, 仅整数): ${RESET}" size_gb
+        read -p "${GREEN}请输入要创建的 Swap 大小 (单位 GB, 仅正整数): ${RESET}" size_gb
         if [[ "$size_gb" =~ ^[1-9][0-9]*$ ]]; then
             break
         else
-            print_color "$RED" "错误: 请输入一个有效的正整数 (例如: 4 表示 4GB)。"
+            print_color "$RED" "错误: 输入无效，请输入一个大于 0 的整数 (例如: 4 表示 4GB)。"
         fi
     done
 
@@ -110,29 +141,29 @@ add_swap() {
 
     # 创建 Swap 文件
     print_color "$MAGENTA" "正在创建 Swap 文件 (大小: ${size_gb} GB)..."
+    # 优先使用 fallocate (速度快)
     if command -v fallocate &> /dev/null; then
-        print_color "$BLUE" "使用 fallocate (推荐)..."
+        print_color "$BLUE" "尝试使用 fallocate 命令..."
         fallocate -l "${size_gb}G" "$SWAP_FILE"
-        if [[ $? -ne 0 ]]; then
-            print_color "$YELLOW" "fallocate 失败，尝试使用 dd (可能较慢)..."
+        local create_rc=$?
+        if [[ $create_rc -ne 0 ]]; then
+            print_color "$YELLOW" "fallocate 失败 (代码: $create_rc)，尝试使用 dd (可能较慢)..."
             rm -f "$SWAP_FILE" # 清理失败的 fallocate 文件
             dd if=/dev/zero of="$SWAP_FILE" bs=1G count="$size_gb" status=progress
-            if [[ $? -ne 0 ]]; then
-                print_color "$RED" "错误: 使用 dd 创建 Swap 文件失败。"
-                rm -f "$SWAP_FILE" # 清理失败的 dd 文件
-                press_any_key_to_continue
-                return
-            fi
+            create_rc=$?
         fi
     else
-        print_color "$YELLOW" "未找到 fallocate，使用 dd (可能较慢)..."
+        # fallocate 不可用，使用 dd
+        print_color "$YELLOW" "未找到 fallocate 命令，使用 dd (可能较慢)..."
         dd if=/dev/zero of="$SWAP_FILE" bs=1G count="$size_gb" status=progress
-         if [[ $? -ne 0 ]]; then
-            print_color "$RED" "错误: 使用 dd 创建 Swap 文件失败。"
-            rm -f "$SWAP_FILE"
-            press_any_key_to_continue
-            return
-        fi
+        create_rc=$?
+    fi
+
+    if [[ $create_rc -ne 0 ]]; then
+        print_color "$RED" "错误: 创建 Swap 文件失败。"
+        rm -f "$SWAP_FILE" # 确保清理
+        press_any_key_to_continue
+        return
     fi
     print_color "$GREEN" "Swap 文件创建成功。"
 
@@ -163,70 +194,63 @@ add_swap() {
     swapon "$SWAP_FILE"
     if [[ $? -ne 0 ]]; then
         print_color "$RED" "错误: 启用 Swap (swapon) 失败。"
-        # 可能需要手动检查系统日志
+        # 此处不自动删除文件，因为格式化已成功，可能需要手动检查
         press_any_key_to_continue
         return
     fi
     print_color "$GREEN" "Swap 已启用。"
 
     # 添加到 fstab 实现持久化
-    print_color "$MAGENTA" "添加到 $FSTAB_FILE 实现开机自启..."
+    print_color "$MAGENTA" "准备添加到 $FSTAB_FILE 实现开机自启..."
     local fstab_entry="$SWAP_FILE none swap sw 0 0"
-    # 再次检查，以防万一在操作过程中被其他进程添加
+    # 再次检查 fstab 条目是否存在
     if grep -qF "$SWAP_FILE" "$FSTAB_FILE"; then
         print_color "$YELLOW" "警告: '$SWAP_FILE' 的条目已存在于 $FSTAB_FILE，跳过添加。"
     else
-        # 备份 fstab
-        local backup_fstab="${FSTAB_FILE}.bak_swap_$(date +%Y%m%d_%H%M%S)"
-        cp "$FSTAB_FILE" "$backup_fstab"
-        if [[ $? -eq 0 ]]; then
-            print_color "$GREEN" "已备份 $FSTAB_FILE 到 $backup_fstab"
+        # 询问是否备份 fstab
+        if confirm_action "是否在添加条目前备份 $FSTAB_FILE 文件?"; then
+            if ! backup_fstab; then
+                if ! confirm_action "备份失败，是否仍要继续添加条目到 $FSTAB_FILE?"; then
+                    print_color "$BLUE" "操作已取消，Swap 当前已启用但未配置开机自启。"
+                    press_any_key_to_continue
+                    return
+                fi
+            fi
         else
-            print_color "$YELLOW" "警告: 备份 $FSTAB_FILE 失败，但仍会尝试添加条目。"
+            print_color "$YELLOW" "已跳过备份 $FSTAB_FILE。"
         fi
+
         # 添加条目
+        print_color "$MAGENTA" "正在添加条目到 $FSTAB_FILE ..."
         echo "$fstab_entry" >> "$FSTAB_FILE"
         if [[ $? -ne 0 ]]; then
             print_color "$RED" "错误: 自动添加条目到 $FSTAB_FILE 失败！"
             print_color "$RED" "请手动添加以下行到 $FSTAB_FILE :"
-            print_color "$RED" "  $fstab_entry"
+            print_color "$RED$BOLD" "  $fstab_entry"
         else
             print_color "$GREEN" "成功添加条目到 $FSTAB_FILE。"
         fi
     fi
 
-    print_color "$GREEN" "Swap 添加流程完成！"
+    print_color "$GREEN$BOLD" "Swap 添加流程完成！"
     press_any_key_to_continue
 }
 
 # 2. 删除 Swap 分区 (文件)
 delete_swap() {
     print_separator
-    print_color "$CYAN" "  Swap 删除向导"
+    print_color "$CYAN$BOLD" "   2. 删除 Swap 功能"
     print_separator
-    print_color "$YELLOW" "本操作将尝试禁用、移除 fstab 配置并删除 Swap 文件: $SWAP_FILE"
+    print_color "$YELLOW" "此操作将尝试禁用、移除 $FSTAB_FILE 配置并删除 Swap 文件: $SWAP_FILE"
 
     local swap_active=false
     local fstab_configured=false
     local file_exists=false
 
-    # 检查 Swap 是否活动
-    if swapon --show | grep -qF "$SWAP_FILE"; then
-        swap_active=true
-        print_color "$MAGENTA" "检测到 Swap '$SWAP_FILE' 当前处于活动状态。"
-    fi
-
-    # 检查 fstab 配置
-    if grep -qF "$SWAP_FILE" "$FSTAB_FILE"; then
-        fstab_configured=true
-        print_color "$MAGENTA" "检测到 '$SWAP_FILE' 的配置存在于 $FSTAB_FILE。"
-    fi
-
-    # 检查文件是否存在
-    if [[ -e "$SWAP_FILE" ]]; then
-        file_exists=true
-        print_color "$MAGENTA" "检测到 Swap 文件 '$SWAP_FILE' 存在。"
-    fi
+    # 检查状态
+    if swapon --show | grep -qF "$SWAP_FILE"; then swap_active=true; fi
+    if grep -qF "$SWAP_FILE" "$FSTAB_FILE"; then fstab_configured=true; fi
+    if [[ -e "$SWAP_FILE" ]]; then file_exists=true; fi
 
     if ! $swap_active && ! $fstab_configured && ! $file_exists; then
         print_color "$GREEN" "指定的 Swap 文件 '$SWAP_FILE' 或其配置似乎不存在，无需删除。"
@@ -234,8 +258,13 @@ delete_swap() {
         return
     fi
 
-    read -p "${BOLD}${RED}确定要执行删除操作吗？(y/N): ${RESET}" confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    print_color "$MAGENTA" "检测到以下状态:"
+    [[ "$swap_active" = true ]] && print_color "$MAGENTA" " - Swap 当前处于活动状态。"
+    [[ "$fstab_configured" = true ]] && print_color "$MAGENTA" " - 在 $FSTAB_FILE 中找到配置。"
+    [[ "$file_exists" = true ]] && print_color "$MAGENTA" " - Swap 文件 '$SWAP_FILE' 存在。"
+
+    echo ""
+    if ! confirm_action "${BOLD}${RED}确定要执行删除操作吗？此操作不可逆！${RESET}"; then
         print_color "$BLUE" "操作已取消。"
         press_any_key_to_continue
         return
@@ -248,34 +277,46 @@ delete_swap() {
         if [[ $? -eq 0 ]]; then
             print_color "$GREEN" "Swap 禁用成功。"
         else
-            print_color "$RED" "错误: 禁用 Swap '$SWAP_FILE' 失败。请手动检查。"
-            # 即使失败也尝试继续后续清理步骤
+            # 即便禁用失败，也可能需要清理配置和文件，给出警告并继续
+            print_color "$RED" "错误: 禁用 Swap '$SWAP_FILE' 失败。请手动检查。将继续尝试清理配置和文件..."
         fi
     fi
 
     # 移除 fstab 条目
     if $fstab_configured; then
-        print_color "$MAGENTA" "正在从 $FSTAB_FILE 移除配置..."
-        # 备份 fstab
-        local backup_fstab="${FSTAB_FILE}.bak_swap_del_$(date +%Y%m%d_%H%M%S)"
-        cp "$FSTAB_FILE" "$backup_fstab"
-        if [[ $? -eq 0 ]]; then
-            print_color "$GREEN" "已备份 $FSTAB_FILE 到 $backup_fstab"
+        print_color "$MAGENTA" "准备从 $FSTAB_FILE 移除配置..."
+        # 询问是否备份 fstab
+        if confirm_action "是否在移除条目前备份 $FSTAB_FILE 文件?"; then
+             if ! backup_fstab; then
+                if ! confirm_action "备份失败，是否仍要继续尝试从 $FSTAB_FILE 移除条目?"; then
+                    print_color "$BLUE" "操作已取消。Swap 可能仍处于禁用状态，但 fstab 配置和文件未被修改。"
+                    press_any_key_to_continue
+                    return
+                fi
+            fi
         else
-            print_color "$YELLOW" "警告: 备份 $FSTAB_FILE 失败，但仍会尝试移除条目。"
+            print_color "$YELLOW" "已跳过备份 $FSTAB_FILE。"
         fi
 
-        # 使用 sed 安全地删除包含 SWAP_FILE 的行 (使用 # 作为分隔符避免路径中的 /)
-        sed -i.swap_tmp -e "#^${SWAP_FILE}[[:space:]]#d" "$FSTAB_FILE"
-        # -i.swap_tmp 会创建一个备份文件 fstab.swap_tmp
-        if [[ $? -eq 0 ]]; then
+        print_color "$MAGENTA" "正在从 $FSTAB_FILE 移除条目..."
+        # 使用 sed 安全地删除包含 SWAP_FILE 的行。-i 直接修改文件。
+        # 使用 # 作为分隔符，避免路径中的 / 干扰。
+        # [[:space:]] 匹配空格或制表符，确保只删除以此文件开头的行。
+        sed -i.swap_del_bak "/^${SWAP_FILE//\//\\/}[[:space:]]/d" "$FSTAB_FILE"
+        local sed_rc=$?
+        # ${SWAP_FILE//\//\\/} 将路径中的 / 转义为 \/ 供 sed 使用
+
+        if [[ $sed_rc -eq 0 ]]; then
             print_color "$GREEN" "成功从 $FSTAB_FILE 移除条目。"
-            rm -f "${FSTAB_FILE}.swap_tmp" # 删除 sed 创建的临时备份
+            rm -f "${FSTAB_FILE}.swap_del_bak" # 删除 sed 创建的备份文件
         else
             print_color "$RED" "错误: 自动从 $FSTAB_FILE 移除条目失败！"
             print_color "$RED" "请手动编辑 $FSTAB_FILE 并删除包含 '$SWAP_FILE' 的行。"
-            # 还原备份可能更安全，但这里选择提示用户手动操作
-            # mv "${FSTAB_FILE}.swap_tmp" "$FSTAB_FILE" # 还原 sed 的备份
+            # 提示用户检查 sed 创建的备份文件
+            if [[ -e "${FSTAB_FILE}.swap_del_bak" ]]; then
+                print_color "$YELLOW" "sed 操作失败，但可能已创建备份文件: ${FSTAB_FILE}.swap_del_bak"
+            fi
+            # 不建议自动还原，提示用户手动操作更安全
         fi
     fi
 
@@ -290,40 +331,43 @@ delete_swap() {
         fi
     fi
 
-    print_color "$GREEN" "Swap 删除流程完成！"
+    print_color "$GREEN$BOLD" "Swap 删除流程完成！"
     press_any_key_to_continue
 }
 
 # 3. 显示 Swap 分区详情
 show_swap_info() {
     print_separator
-    print_color "$CYAN" "  当前 Swap 状态详情"
+    print_color "$CYAN$BOLD" "   3. 查看当前 Swap 详情"
     print_separator
 
-    print_color "$BLUE" "--- 活动 Swap 列表 (swapon --show) ---"
-    swapon --show
-    if [[ $? -ne 0 || -z "$(swapon --show)" ]]; then
-        print_color "$YELLOW" "  (当前没有活动的 Swap)"
+    print_color "$BLUE$BOLD" "--- 活动 Swap 列表 (swapon --show) ---"
+    local swap_show_output=$(swapon --show)
+    if [[ -n "$swap_show_output" ]]; then
+        echo "$swap_show_output"
+    else
+        print_color "$YELLOW" "  (当前没有检测到活动的 Swap)"
     fi
     echo ""
 
-    print_color "$BLUE" "--- 内存与 Swap 使用概览 (free -h) ---"
+    print_color "$BLUE$BOLD" "--- 内存与 Swap 使用概览 (free -h) ---"
     free -h
     echo ""
 
-    print_color "$BLUE" "--- /proc/swaps 内容 ---"
-    if [[ -e /proc/swaps ]]; then
-        cat /proc/swaps
+    print_color "$BLUE$BOLD" "--- 内核 Swap 信息 (/proc/swaps) ---"
+    if [[ -e /proc/swaps && -s /proc/swaps ]]; then # 检查文件存在且非空
+         cat /proc/swaps
     else
-        print_color "$YELLOW" "  (/proc/swaps 文件不存在)"
+        print_color "$YELLOW" "  (/proc/swaps 文件不存在或为空)"
     fi
     echo ""
 
-    print_color "$BLUE" "--- $FSTAB_FILE 中相关的 Swap 配置 ---"
-    if grep -i 'swap' "$FSTAB_FILE"; then
-        grep -i --color=always 'swap' "$FSTAB_FILE"
+    print_color "$BLUE$BOLD" "--- $FSTAB_FILE 中相关的 Swap 配置行 ---"
+    # 使用 grep -i 查找包含 swap (忽略大小写) 的行，并高亮显示
+    if grep -q -i 'swap' "$FSTAB_FILE"; then
+        grep --color=always -i 'swap' "$FSTAB_FILE"
     else
-         print_color "$YELLOW" "  (在 $FSTAB_FILE 中未找到 'swap' 相关的配置行)"
+         print_color "$YELLOW" "  (在 $FSTAB_FILE 中未找到包含 'swap' 的配置行)"
     fi
 
     press_any_key_to_continue
@@ -335,29 +379,32 @@ display_menu() {
     print_separator
     print_color "$BOLD$CYAN" "    Linux Swap 管理脚本 (管理对象: $SWAP_FILE)"
     print_separator
-    print_color "$GREEN" "  1. 创建并启用 Swap (输入大小 GB)"
-    print_color "$RED" "  2. 删除 Swap (禁用, 移除配置, 删除文件)"
-    print_color "$YELLOW" "  3. 查看当前 Swap 详情"
-    print_color "$MAGENTA" "  4. 退出脚本"
+    echo ""
+    print_color "$GREEN" "  [1] 创建并启用 Swap (输入大小 GB)"
+    print_color "$RED" "  [2] 删除 Swap (禁用, 清理配置, 删除文件)"
+    print_color "$YELLOW" "  [3] 查看当前 Swap 详情"
+    print_color "$MAGENTA" "  [4] 退出脚本"
+    echo ""
     print_separator
-    read -p "${BOLD}请输入选项编号 (1-4): ${RESET}" choice
+    read -p "${BOLD}请输入选项编号 [1-4]: ${RESET}" choice
 }
 
 # --- 主逻辑 ---
 
 # 首先检查并获取 root 权限
 if [[ "$(id -u)" -ne 0 ]]; then
-   print_color "$YELLOW" "提示: 需要 root 权限来执行 Swap 操作。"
+   print_color "$YELLOW" "提示: 执行此脚本需要 root 权限。"
    # 尝试使用 sudo 重新执行脚本本身
    # "$0" 是当前脚本的路径, "$@" 会传递所有原始参数 (虽然此脚本菜单模式下通常不带参数)
-   print_color "$BLUE" "正在尝试使用 sudo 重新运行..."
+   print_color "$BLUE" "正在尝试使用 'sudo' 重新运行..."
+   echo ""
    sudo "$0" "$@"
    # sudo 执行后的退出码会传递给父进程
    exit $? # 退出原始的非 root 进程
 fi
 
 # 如果已经是 root 或 sudo 成功，则继续执行
-print_color "$GREEN" "当前用户具有 root 权限，脚本可以继续执行。"
+print_color "$GREEN" "当前用户具有 root 权限，脚本继续执行..."
 sleep 1 # 短暂停顿
 
 # 主循环
@@ -374,7 +421,7 @@ while true; do
             show_swap_info
             ;;
         4)
-            print_color "$BLUE" "正在退出脚本..."
+            print_color "$BLUE$BOLD" "正在退出脚本... 再见！"
             print_separator
             break # 跳出 while 循环
             ;;
