@@ -97,7 +97,7 @@ create_swap() {
     # 获取大小并验证
     local size_gb
     while true; do
-        read -p "$(print_message "$COLOR_YELLOW" "请输入要创建的 Swap 大小（单位 G，例如输入2 表示 2G）: ")" size_gb
+        read -p "$(print_message "$COLOR_YELLOW" "请输入要创建的 Swap 大小（单位 G，例如输入 2 表示 2G）: ")" size_gb
         if [[ "$size_gb" =~ ^[1-9][0-9]*$ ]]; then
             # 检查磁盘空间
             local required_kb=$((size_gb * 1024 * 1024))
